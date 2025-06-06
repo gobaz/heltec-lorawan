@@ -11,25 +11,32 @@
 #include <heltec-eink-modules.h>
 #include <SimpleKalmanFilter.h>
 
-EInkDisplay_VisionMasterE290 display;
-
-
 #define MINIMUM_DELAY 10
+
+typedef struct {
+  uint8_t size;
+  float rssi;
+  float snr;
+  uint8_t num1;
+  uint8_t num2;
+  uint8_t num3;
+} LoraData_t;
 
 
 void goToSleep( void );
-void lora( void );
 portTASK_FUNCTION_PROTO( vTaskLed, pvParameters );
 portTASK_FUNCTION_PROTO( vTaskEink, pvParameters );
 portTASK_FUNCTION_PROTO( vTaskADC, pvParameters );
 portTASK_FUNCTION_PROTO( vTaskLora, pvParameters );
 
+EInkDisplay_VisionMasterE290 display;
 LoRaWANNode* node;
 RTC_DATA_ATTR uint8_t count = 0;
 float CalculatedVoltage = 0.0;
+LoraData_t  lora_data;
 
-
-SemaphoreHandle_t sema_CalculatedVoltage;
+SemaphoreHandle_t sem_CalculatedVoltage;
+SemaphoreHandle_t sem_LoraData;
 
 /************ SETUP *****************/
 
@@ -51,9 +58,11 @@ void setup() {
     display.printCenter( "Hello, World!" );
   }
 
-  sema_CalculatedVoltage = xSemaphoreCreateBinary();
-  xSemaphoreGive( sema_CalculatedVoltage );
-  xTaskCreate( vTaskLed, "LED", 1024 * 2, (void*)1, tskIDLE_PRIORITY, NULL );
+  sem_CalculatedVoltage = xSemaphoreCreateBinary();
+  xSemaphoreGive( sem_CalculatedVoltage );
+  sem_LoraData = xSemaphoreCreateBinary();
+  xSemaphoreGive( sem_LoraData );
+  // xTaskCreate( vTaskLed, "LED", 1024 * 2, (void*)1, tskIDLE_PRIORITY, NULL );
   xTaskCreate( vTaskEink, "EINK", 1024 * 3, (void*)1, tskIDLE_PRIORITY, NULL );
   xTaskCreate( vTaskADC, "ADC", 1024 * 3, (void*)1, tskIDLE_PRIORITY, NULL );
   xTaskCreate( vTaskLora, "LORA", 1024 * 5, (void*)1, tskIDLE_PRIORITY, NULL );
@@ -105,9 +114,17 @@ portTASK_FUNCTION( vTaskEink, pvParameters ) {
       display.printf( "%.1fC", temp );
       display.setCursor( 0, 40 );
       display.printf( "millis: %ld", pdTICKS_TO_MS( xTaskGetTickCount() ) );
-      display.drawLine( 0, 20 - 3, 295, 20 - 3, BLACK );
-      display.drawLine( 0, 40 - 3, 295, 40 - 3, BLACK );
+      // display.drawLine( 0, 20 - 3, 295, 20 - 3, BLACK );
+      // display.drawLine( 0, 40 - 3, 295, 40 - 3, BLACK );
       display.drawLine( 0, 60 - 3, 295, 60 - 3, BLACK );
+      display.setCursor( 0, 60 );
+      display.printf( "RSSI: %.2f  SNR: %.2f", lora_data.rssi, lora_data.snr );
+
+      if ( lora_data.size > 0 ) {
+        display.setTextSize( 3 );
+        display.setCursor( 0, 80 );
+        display.printf( "%c %c %c", lora_data.num1, lora_data.num2, lora_data.num3 );
+      }
     }
     unsigned long t2 = millis();
     // Serial.printf( "draw: %u\n", t2 - t1 );
@@ -139,9 +156,9 @@ portTASK_FUNCTION( vTaskADC, pvParameters ) {
     KF_ADC_b.setProcessNoise( (esp_timer_get_time() - TimePastKalman) / 1000000.0f ); //get time, in microsecods, since last readings
     adcValue = KF_ADC_b.updateEstimate( adcValue ); // apply simple Kalman filter
     Vbatt = adcValue / 204.5;//vRefScale;
-    xSemaphoreTake( sema_CalculatedVoltage, portMAX_DELAY );
+    xSemaphoreTake( sem_CalculatedVoltage, portMAX_DELAY );
     CalculatedVoltage = Vbatt;
-    xSemaphoreGive( sema_CalculatedVoltage );
+    xSemaphoreGive( sem_CalculatedVoltage );
 
 #if 0
     printCount++;
@@ -177,26 +194,13 @@ portTASK_FUNCTION( vTaskLora, pvParameters ) {
   int16_t state;
 
   for ( ;;) {
-    // radio.
-    // initialize radio
-    // if ( initialized ) {
-    //   state = RADIOLIB_ERR_NONE;
-    // }
-    // else {
-      state = radio.begin();
-    // }
+    state = radio.begin();
     if ( state != RADIOLIB_ERR_NONE ) {
       log_e( "Radio did not initialize. We'll try again later." );
       // goToSleep();
-      // goto wait1;
     }
     else {
-      if ( initialized ) {
-        log_i( "Radio already initialized." );
-      }
-      else {
-        log_i( "Radio initialized." );
-      }
+      log_i( "Radio initialized." );
       initialized = true;
 
       node = persist.manage( &radio );
@@ -204,7 +208,6 @@ portTASK_FUNCTION( vTaskLora, pvParameters ) {
       if ( !node->isActivated() ) {
         log_e( "Could not join network. We'll try again later." );
         // goToSleep();
-        // goto wait1;
       }
       else {
 
@@ -227,14 +230,13 @@ portTASK_FUNCTION( vTaskLora, pvParameters ) {
 
         if ( state == RADIOLIB_ERR_NONE ) {
           log_i( "Message sent, no downlink received." );
-          // Serial.printf( "confirmed: %x\nconfirming: %x\ndatarate: %u\nfreq: %u\npower %u\nfCnt: %lu\nfport: %u\nnbtrans: %u\n",
-          //   evUp.confirmed, evUp.confirming, evUp.datarate, evUp.freq, evUp.power, evUp.fCnt, evUp.fPort, evUp.nbTrans );
+          xSemaphoreTake( sem_LoraData, portMAX_DELAY );
+          lora_data.size = 0;
+          lora_data.rssi = node->phyLayer->getRSSI();
+          lora_data.snr = node->phyLayer->getSNR();
+          xSemaphoreGive( sem_LoraData );
         }
         else if ( state > 0 ) {
-          // Serial.printf( "confirmed: %x\nconfirming: %x\ndatarate: %u\nfreq: %u\npower %u\nfCnt: %lu\nfport: %u\nnbtrans: %u\n",
-          //   evUp.confirmed, evUp.confirming, evUp.datarate, evUp.freq, evUp.power, evUp.fCnt, evUp.fPort, evUp.nbTrans );
-          // Serial.printf( "confirmed: %x\nconfirming: %x\ndatarate: %u\nfreq: %u\npower %u\nfCnt: %lu\nfport: %u\nnbtrans: %u\n",
-          //   evDown.confirmed, evDown.confirming, evDown.datarate, evDown.freq, evDown.power, evDown.fCnt, evDown.fPort, evDown.nbTrans );
 
           log_i( "Message sent, downlink received." );
           log_i( "donw (%d): ", lenDown );
@@ -243,6 +245,19 @@ portTASK_FUNCTION( vTaskLora, pvParameters ) {
           if ( lenDown >= 2 && downlinkData[0] == 0x4C && downlinkData[1] <= 100 ) {
             heltec_led( downlinkData[1] );
           }
+          xSemaphoreTake( sem_LoraData, portMAX_DELAY );
+          if ( lenDown > 0 ) {
+            lora_data.size = lenDown;
+            lora_data.num1 = downlinkData[0];
+            lora_data.num2 = downlinkData[1];
+            lora_data.num3 = downlinkData[2];
+          }
+          else {
+            lora_data.size = 0;
+          }
+          lora_data.rssi = node->phyLayer->getRSSI();
+          lora_data.snr = node->phyLayer->getSNR();
+          xSemaphoreGive( sem_LoraData );
         }
         else {
           log_e( "sendReceive returned error %d, we'll try again later.\n", state );
