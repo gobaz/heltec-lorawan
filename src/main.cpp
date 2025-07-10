@@ -1,6 +1,7 @@
 #include <Arduino.h>
 // #include "heltec.h"
 
+// #define RADIOLIB_GODMODE 1
 #define HELTEC_NO_DISPLAY               // Disabling default Heltec lib OLED display
 // #define HELTEC_NO_RADIOLIB
 #define BUTTON 21                       // Redefine button pin 
@@ -45,18 +46,20 @@ void setup() {
   analogReadResolution( 12 );
   analogSetPinAttenuation( VBAT_ADC, ADC_0db );
   // pinMode( 46, INPUT_PULLUP );
-  pinMode( VBAT_CTRL, OUTPUT );
-  digitalWrite( VBAT_CTRL, HIGH );
-  float mv = analogReadMilliVolts( 7 ); // dummy read
+  pinMode( 46, OUTPUT );
+  digitalWrite( 46, HIGH );
+  float mv = analogReadMilliVolts( 12 ); // dummy read
 
   display.landscape();
   display.fastmodeOn();
   display.clear();
   // display.printCenter( "Hello, World!" );
-  // display.update();
+  display.update();
   DRAW( display ) {
-    display.printCenter( "Hello, World!" );
+    display.setTextSize( 2 );
+    display.printCenter( "Starting..." );
   }
+  vTaskDelay( 3000 );
 
   sem_CalculatedVoltage = xSemaphoreCreateBinary();
   xSemaphoreGive( sem_CalculatedVoltage );
@@ -65,7 +68,7 @@ void setup() {
   // xTaskCreate( vTaskLed, "LED", 1024 * 2, (void*)1, tskIDLE_PRIORITY, NULL );
   xTaskCreate( vTaskEink, "EINK", 1024 * 3, (void*)1, tskIDLE_PRIORITY, NULL );
   xTaskCreate( vTaskADC, "ADC", 1024 * 3, (void*)1, tskIDLE_PRIORITY, NULL );
-  xTaskCreate( vTaskLora, "LORA", 1024 * 5, (void*)1, tskIDLE_PRIORITY, NULL );
+  xTaskCreate( vTaskLora, "LORA", 1024 * 6, (void*)1, tskIDLE_PRIORITY, NULL );
 
   log_i( "Init." );
 
@@ -103,7 +106,7 @@ portTASK_FUNCTION( vTaskEink, pvParameters ) {
     vbatp = heltec_battery_percent( CalculatedVoltage );
     temp = 0; //heltec_temperature();
 
-    // Serial.printf( "Temperature: %.1f °C\n", temp );
+    Serial.printf( "Temperature: %.1f °C\n", temp );
 
     unsigned long t1 = millis();
     DRAW( display ) {
@@ -151,14 +154,17 @@ portTASK_FUNCTION( vTaskADC, pvParameters ) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   for ( ;;) {
-    analogReadRaw( VBAT_ADC ); //read and discard
-    adcValue = float( analogReadMilliVolts( VBAT_ADC ) ); //take a raw ADC reading
+    // analogReadRaw( VBAT_ADC ); //read and discard
+    analogRead( 7 ); //read and discard
+    adcValue = float( analogReadMilliVolts( 7 ) ); //take a raw ADC reading
     KF_ADC_b.setProcessNoise( (esp_timer_get_time() - TimePastKalman) / 1000000.0f ); //get time, in microsecods, since last readings
     adcValue = KF_ADC_b.updateEstimate( adcValue ); // apply simple Kalman filter
     Vbatt = adcValue / 204.5;//vRefScale;
     xSemaphoreTake( sem_CalculatedVoltage, portMAX_DELAY );
     CalculatedVoltage = Vbatt;
     xSemaphoreGive( sem_CalculatedVoltage );
+    // log_i( "mV: %f vbat: %.4f", adcValue, Vbatt );
+    vTaskDelay(100);
 
 #if 0
     printCount++;
@@ -234,6 +240,8 @@ portTASK_FUNCTION( vTaskLora, pvParameters ) {
           lora_data.size = 0;
           lora_data.rssi = node->phyLayer->getRSSI();
           lora_data.snr = node->phyLayer->getSNR();
+          // lora_data.rssi = node->phy->getRSSI();
+          // lora_data.snr = node->phy->getSNR();
           xSemaphoreGive( sem_LoraData );
         }
         else if ( state > 0 ) {
@@ -257,6 +265,8 @@ portTASK_FUNCTION( vTaskLora, pvParameters ) {
           }
           lora_data.rssi = node->phyLayer->getRSSI();
           lora_data.snr = node->phyLayer->getSNR();
+          // lora_data.rssi = node->phy->getRSSI();
+          // lora_data.snr = node->phy->getSNR();
           xSemaphoreGive( sem_LoraData );
         }
         else {
